@@ -18,7 +18,7 @@
     "3": {
       "title": "Im Anruf<br>Bitte klopfen",
       "note": "gerne unterbrechen",
-      "emoji": "🔇",
+      "emoji": "📞",
       "color": "#FBC02D",
       "event": [3]
     },
