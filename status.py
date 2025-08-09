@@ -118,7 +118,7 @@ def set_mode_event(event):
             set_mode(mode)
             
             try:
-                subprocess.run(["notify-send", str(MODES[current_mode]["emoji"])+" (event)", MODES[current_mode]["title"].replace("<br>", " · ")], check=False)
+                subprocess.run(["notify-send", str(MODES[current_mode]["emoji"]), MODES[current_mode]["title"].replace("<br>", " · ")], check=False)
             except FileNotFoundError:
                 pass
             
