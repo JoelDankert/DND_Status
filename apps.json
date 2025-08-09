@@ -1,0 +1,40 @@
+{
+  "default_mode": "4",
+  "modes": {
+    "1": {
+      "title": "Nicht Stören<br>Lieber schreiben",
+      "note": "ungern unterbrechen",
+      "emoji": "⛔",
+      "color": "#D32F2F",
+      "event": [101]
+    },
+    "2": {
+      "title": "Im Anruf<br>Nicht stören",
+      "note": "ungern unterbrechen",
+      "emoji": "🔇",
+      "color": "#F57C00",
+      "event": [103]
+    },
+    "3": {
+      "title": "Im Anruf<br>Bitte klopfen",
+      "note": "gerne unterbrechen",
+      "emoji": "🔇",
+      "color": "#FBC02D",
+      "event": [3]
+    },
+    "4": {
+      "title": "Verfügbar",
+      "note": "gerne unterbrechen",
+      "emoji": "✅",
+      "color": "#388E3C",
+      "event": [1]
+    },
+    "5": {
+      "title": "Bin kurz weg",
+      "note": "gleich wieder da",
+      "emoji": "🫠",
+      "color": "#D1D1D1",
+      "event": [2,102]
+    }
+  }
+}

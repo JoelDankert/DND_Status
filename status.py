@@ -1,54 +1,50 @@
-# statusboard_bouncing.py
-# Vollbild-Statusboard mit langsamem DVD-Logo-Bounce-Effekt.
-# - Emoji + Text, live sync via SSE
-# - Globaler Hotkey: F9 -> nächster Modus (notify-send unter Linux)
-# - Browser: 1–4 setzt Modus, Doppelklick/‑tap -> Vollbild
-# - Inhalt "schwebt" langsam über den Bildschirm und prallt an den Kanten ab
-# - Hintergrund: dunklere Volltonfarbe, Karte in Originalfarbe
-
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, send_from_directory
 from queue import Queue
-import socket
 import threading
+import json
+import os
+import socket
 import subprocess
-from pynput import keyboard
+import re
+import shutil
+import time
 
-app = Flask(__name__)
+# --- Hotkey-Unterstützung nur aktivieren, wenn möglich ---
+hotkeys_available = True
+try:
+    from pynput import keyboard
+except Exception as e:
+    hotkeys_available = False
+    print(f"[Hinweis] Hotkeys deaktiviert: {e}")
 
-MODES = {
-    "1": {"title": "Nicht Stören<br>Lieber schreiben",    "note": "ungern unterbrechen", "emoji": "⛔",  "color": "#D32F2F"},
-    "2": {"title": "Im Anruf<br>Nicht stören",            "note": "ungern unterbrechen", "emoji": "🔇",  "color": "#F57C00"},
-    "3": {"title": "Im Anruf<br>Bitte klopfen",           "note": "gerne unterbrechen",  "emoji": "🔇",  "color": "#FBC02D"},
-    "4": {"title": "Verfügbar",                           "note": "gerne unterbrechen",  "emoji": "✅",  "color": "#388E3C"},
-    "5": {"title": "Bin kurz Weg",                        "note": "gleich wieder da",    "emoji": "🫠",   "color": "#D1D1D1"},
-}
+# -------- config / data --------
+HERE = os.path.dirname(os.path.abspath(__file__))
+APPS_JSON_PATH = os.path.join(HERE, "apps.json")
 
-DEFAULT_MODE = "1"
+with open(APPS_JSON_PATH, "r", encoding="utf-8") as f:
+    data = json.load(f)
+MODES = data["modes"]
+DEFAULT_MODE = data.get("default_mode", "1")
+
 HOST, PORT = "0.0.0.0", 8000
 
+# -------- state & helpers --------
 current_mode = DEFAULT_MODE
 subscribers = set()
 subs_lock = threading.Lock()
+dnd = False
 
-def get_lan_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-    finally:
-        s.close()
+def _esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"','\\"')
 
-def serialize_mode():
+def serialize_mode() -> str:
     m = MODES[current_mode]
-    def esc(s): return s.replace("\\","\\\\").replace('"','\\"')
     return (
-        f'{{"key":"{esc(current_mode)}",'
-        f'"title":"{esc(m["title"])}",'
-        f'"note":"{esc(m["note"])}",'
-        f'"emoji":"{esc(m["emoji"])}",'
-        f'"color":"{esc(m["color"])}"}}'
+        f'{{"key":"{_esc(current_mode)}",'
+        f'"title":"{_esc(m["title"])}",'
+        f'"note":"{_esc(m["note"])}",'
+        f'"emoji":"{_esc(m["emoji"])}",'
+        f'"color":"{_esc(m["color"])}"}}'
     )
 
 def publish():
@@ -63,169 +59,172 @@ def publish():
         for q in dead:
             subscribers.discard(q)
 
-def cycle_mode():
-    global current_mode
-    keys = sorted(MODES.keys(), key=int)
-    idx = keys.index(current_mode)
-    current_mode = keys[(idx + 1) % len(keys)]
-    publish()
-    try:
-        subprocess.run(["notify-send", f"Modus {current_mode}", MODES[current_mode]["title"].replace("<br>", " · ")], check=False)
-    except FileNotFoundError:
-        pass
-
-def sse_stream():
+def register_subscriber() -> Queue:
     q = Queue()
     with subs_lock:
         subscribers.add(q)
     q.put_nowait(serialize_mode())
+    return q
+
+def unregister_subscriber(q: Queue):
+    with subs_lock:
+        subscribers.discard(q)
+
+def get_lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        while True:
-            data = q.get()
-            yield f"data: {data}\n\n"
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
     finally:
-        with subs_lock:
-            subscribers.discard(q)
+        s.close()
+
+def cycle_dnd():
+    global dnd
+    dnd = not dnd
+    
+    try:
+        subprocess.run(["notify-send", "Bitte nicht stören aktiviert", "Status wird geändert"], check=False)
+    except FileNotFoundError:
+        pass
+
+def hotkey_listener():
+    if not hotkeys_available:
+        return
+    pressed = set()
+    def on_press(key):
+        if key == keyboard.Key.f9 and key not in pressed:
+            pressed.add(key)
+            cycle_dnd()
+    def on_release(key):
+        if key in pressed:
+            pressed.remove(key)
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
+
+    
+# events
+
+def set_mode_event(event):
+    global current_mode
+    
+    for mode in MODES:
+        curr = MODES[mode]
+        if event in curr["event"]:
+            set_mode(mode)
+            
+            try:
+                subprocess.run(["notify-send", str(MODES[current_mode]["emoji"])+" (event)", MODES[current_mode]["title"].replace("<br>", " · ")], check=False)
+            except FileNotFoundError:
+                pass
+            
+
+def event_listener():
+    def run(cmd):
+        try:
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+            return out.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    def cmd_exists(name):
+        return shutil.which(name) is not None
+
+    # --- Detect Discord voice call via PulseAudio/PipeWire (pactl) ---
+    def in_discord_call():
+        if not cmd_exists("pactl"):
+            return False
+
+        so = run(["pactl", "list", "source-outputs"])
+        si = run(["pactl", "list", "sink-inputs"])
+        text = so + "\n" + si
+        blocks = re.split(r"\n(?=\S)", text)
+
+        def block_has_discord(b):
+            return ("application.name = \"Discord\"" in b
+                    or "application.process.binary = \"Discord\"" in b
+                    or re.search(r"^.*Discord.*$", b, re.IGNORECASE | re.MULTILINE))
+
+        def block_running(b):
+            return ("State: RUNNING" in b) or ("Corked: no" in b)
+
+        for b in blocks:
+            if block_has_discord(b) and block_running(b):
+                return True
+
+        # Fallback: if any source-output mentions Discord at all, assume in-call
+        if "source-outputs" in so and ("Discord" in so):
+            return True
+
+        return False
+
+    # --- Idle time (AFK) detection ---
+    def get_idle_seconds():
+        # X11: xprintidle (milliseconds)
+        if cmd_exists("xprintidle"):
+            out = run(["xprintidle"]).strip()
+            if out.isdigit():
+                return int(out) / 1000.0
+
+        return None
+
+    # --- Any media playing now? (MPRIS via playerctl) ---
+    def media_playing_now():
+        if cmd_exists("playerctl"):
+            statuses = run(["playerctl", "-a", "status"])
+            for line in statuses.splitlines():
+                if line.strip().lower() == "playing":
+                    return True
+            return False
+
+        return False
+
+    last_event = None
+
+    while True:
+        event = 1  # default "no other" -> "Verfügbar"
+        try:
+            if in_discord_call():
+                event = 3
+            else:
+                idle = get_idle_seconds()
+                if (idle is not None) and (idle >= 30) and (not media_playing_now()):
+                    event = 2
+        except Exception:
+            event = 1
+
+        if dnd: 
+            event += 100
+        
+        if event != last_event:
+            try:    
+                set_mode_event(event)
+                last_event = event
+            except Exception:
+                pass
+
+        time.sleep(2)  # poll interval
+
+
+# -------- app --------
+app = Flask(__name__, static_folder='.', static_url_path='')
 
 @app.get("/")
 def index():
-    init_color = MODES[current_mode]["color"]
-    return render_template_string("""
-<!doctype html>
-<html lang=\"de\">
-<meta charset=\"utf-8\">
-<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
-<title>Status</title>
-<style>
-  :root { --bg: {{ init_color }}; }
-  html, body {
-    height: 100%; margin: 0;
-    background-color: color-mix(in srgb, var(--bg) 0%, black);
-    font-family: system-ui, sans-serif;
-    overflow: hidden;
-    color: white; text-align: center;
-    transition: background-color .25s ease;
-  }
-  .float {
-    position: fixed; left: 0; top: 0;
-    will-change: transform;
-  }
-  .card {
-    background-color: var(--bg);
-    padding: 2rem 3rem; border-radius: 1.5rem;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
-  }
-  .emoji { font-size: min(32vw, 36vh); margin-bottom: 2rem; white-space: nowrap; }
-  h1 { font-size: clamp(2rem, 5vw, 4rem); margin: 0 0 1rem 0; }
-  p  { font-size: clamp(1rem, 3vw, 2rem); margin: 0; opacity: 0.85; }
-</style>
-
-<div class=\"float\" id=\"float\">
-  <div class=\"card\">
-    <div class=\"emoji\" id=\"emoji\">⏳</div>
-    <h1 id=\"title\">Lade Status…</h1>
-    <p id=\"note\">Bitte warten.</p>
-  </div>
-</div>
-
-<script>
-  const emojiEl = document.getElementById("emoji");
-  const titleEl = document.getElementById("title");
-  const noteEl  = document.getElementById("note");
-  const floatEl = document.getElementById("float");
-  const es = new EventSource("/events");
-
-  function applyMode(m){
-    document.documentElement.style.setProperty('--bg', m.color);
-    emojiEl.textContent = m.emoji;
-    titleEl.innerHTML  = m.title;
-    noteEl.textContent = m.note;
-    flashEdgeHit = false;
-  }
-  es.onmessage = ev => { try { applyMode(JSON.parse(ev.data)); } catch(e) {} };
-
-  let askedFs = false;
-  async function ensureFullscreen(){
-    if (askedFs) return;
-    askedFs = true;
-    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-      try { await document.documentElement.requestFullscreen(); } catch {}
-    }
-  }
-
-  window.addEventListener("keydown", ev => {
-    if (/^[1-4]$/.test(ev.key)) {
-      ensureFullscreen();
-      fetch("/set/" + encodeURIComponent(ev.key), {method:"POST"}).catch(()=>{});
-    }
-  });
-  window.addEventListener("dblclick", () => ensureFullscreen());
-  let lastTap = 0;
-  window.addEventListener("touchend", () => {
-    const now = Date.now();
-    if (now - lastTap < 300) ensureFullscreen();
-    lastTap = now;
-  }, {passive: true});
-
-  let x = 80, y = 60;
-  let vx = 28, vy = 22;
-  const MIN_SPEED = 18;
-  const MAX_SPEED = 60;
-  let lastTime = performance.now();
-  let flashEdgeHit = false;
-
-  function sizeFloatBox(){
-    const rect = floatEl.getBoundingClientRect();
-    return { w: rect.width, h: rect.height };
-  }
-
-  function step(now){
-    const dt = Math.max(0.001, (now - lastTime) / 1000);
-    lastTime = now;
-    const W = window.innerWidth;
-    const H = window.innerHeight;
-    const box = sizeFloatBox();
-    x += vx * dt;
-    y += vy * dt;
-    if (x <= 0) { x = 0; vx = Math.abs(vx); edgeHit(); }
-    else if (x + box.w >= W) { x = W - box.w; vx = -Math.abs(vx); edgeHit(); }
-    if (y <= 0) { y = 0; vy = Math.abs(vy); edgeHit(); }
-    else if (y + box.h >= H) { y = H - box.h; vy = -Math.abs(vy); edgeHit(); }
-    floatEl.style.transform = `translate(${x}px, ${y}px)`;
-    requestAnimationFrame(step);
-  }
-
-  function edgeHit(){
-    if (!flashEdgeHit) return;
-    //flashEdgeHit = false;
-    floatEl.animate([
-      { filter: 'brightness(1.0)' },
-      { filter: 'brightness(1.18)' },
-      { filter: 'brightness(1.0)' }
-    ], { duration: 320 });
-  }
-
-  window.addEventListener('resize', () => {
-    const box = sizeFloatBox();
-    const W = window.innerWidth, H = window.innerHeight;
-    x = Math.min(Math.max(0, x), Math.max(0, W - box.w));
-    y = Math.min(Math.max(0, y), Math.max(0, H - box.h));
-    const sp = Math.hypot(vx, vy);
-    if (sp < MIN_SPEED) {
-      const f = MIN_SPEED / Math.max(1e-3, sp);
-      vx *= f; vy *= f;
-    } else if (sp > MAX_SPEED) {
-      const f = MAX_SPEED / sp; vx *= f; vy *= f;
-    }
-  });
-
-  requestAnimationFrame(step);
-</script>
-""", init_color=init_color)
+    return send_from_directory(HERE, "index.html")
 
 @app.get("/events")
 def events():
-    return Response(sse_stream(), mimetype="text/event-stream")
+    def stream():
+        q = register_subscriber()
+        try:
+            while True:
+                data = q.get()
+                yield f"data: {data}\n\n"
+        finally:
+            unregister_subscriber(q)
+    return Response(stream(), mimetype="text/event-stream")
 
 @app.post("/set/<key>")
 def set_mode(key):
@@ -236,23 +235,17 @@ def set_mode(key):
     publish()
     return ("", 204)
 
-def hotkey_listener():
-    pressed = set()
-    def on_press(key):
-        if key == keyboard.Key.f9 and key not in pressed:
-            pressed.add(key)
-            cycle_mode()
-    def on_release(key):
-        if key in pressed:
-            pressed.remove(key)
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
-
 if __name__ == "__main__":
-    threading.Thread(target=hotkey_listener, daemon=True).start()
+    if hotkeys_available:
+        threading.Thread(target=hotkey_listener, daemon=True).start()
+    else:
+        print("Hotkey F9 ist deaktiviert (kein DISPLAY/X verfügbar).")
+    threading.Thread(target=event_listener, daemon=True).start()
     lan_ip = get_lan_ip()
     print("Statusboard läuft (Bouncing):")
     print(f"  lokal:   http://localhost:{PORT}")
     print(f"  im LAN:  http://{lan_ip}:{PORT}")
-    print("Hotkey: F9 = nächster Modus | Browser: 1–4 setzen, Doppelklick/-tap = Vollbild")
+    
     app.run(host=HOST, port=PORT, debug=False, threaded=True)
+
+

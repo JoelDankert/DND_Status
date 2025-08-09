@@ -1,0 +1,112 @@
+
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Status</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="float" id="float">
+      <div class="card">
+        <div class="emoji" id="emoji">⏳</div>
+        <h1 id="title">Lade Status…</h1>
+        <p id="note">Bitte warten.</p>
+      </div>
+    </div>
+
+    <script>
+      const emojiEl = document.getElementById("emoji");
+      const titleEl = document.getElementById("title");
+      const noteEl  = document.getElementById("note");
+      const floatEl = document.getElementById("float");
+      const es = new EventSource("/events");
+
+      function applyMode(m){
+        document.documentElement.style.setProperty('--bg', m.color);
+        emojiEl.textContent = m.emoji;
+        titleEl.innerHTML  = m.title;
+        noteEl.textContent = m.note;
+        flashEdgeHit = false;
+      }
+      es.onmessage = ev => { try { applyMode(JSON.parse(ev.data)); } catch(e) {} };
+
+      let askedFs = false;
+      async function ensureFullscreen(){
+        if (askedFs) return;
+        askedFs = true;
+        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+          try { await document.documentElement.requestFullscreen(); } catch {}
+        }
+      }
+
+      window.addEventListener("keydown", ev => {
+        if (/^[1-4]$/.test(ev.key)) {
+          ensureFullscreen();
+          fetch("/set/" + encodeURIComponent(ev.key), {method:"POST"}).catch(()=>{});
+        }
+      });
+      window.addEventListener("dblclick", () => ensureFullscreen());
+      let lastTap = 0;
+      window.addEventListener("touchend", () => {
+        const now = Date.now();
+        if (now - lastTap < 300) ensureFullscreen();
+        lastTap = now;
+      }, {passive: true});
+
+      let x = 80, y = 60;
+      let vx = 28, vy = 22;
+      const MIN_SPEED = 18;
+      const MAX_SPEED = 60;
+      let lastTime = performance.now();
+      let flashEdgeHit = false;
+
+      function sizeFloatBox(){
+        const rect = floatEl.getBoundingClientRect();
+        return { w: rect.width, h: rect.height };
+      }
+
+      function step(now){
+        const dt = Math.max(0.001, (now - lastTime) / 1000);
+        lastTime = now;
+        const W = window.innerWidth;
+        const H = window.innerHeight;
+        const box = sizeFloatBox();
+        x += vx * dt;
+        y += vy * dt;
+        if (x <= 0) { x = 0; vx = Math.abs(vx); edgeHit(); }
+        else if (x + box.w >= W) { x = W - box.w; vx = -Math.abs(vx); edgeHit(); }
+        if (y <= 0) { y = 0; vy = Math.abs(vy); edgeHit(); }
+        else if (y + box.h >= H) { y = H - box.h; vy = -Math.abs(vy); edgeHit(); }
+        floatEl.style.transform = `translate(${x}px, ${y}px)`;
+        requestAnimationFrame(step);
+      }
+
+      function edgeHit(){
+        if (!flashEdgeHit) return;
+        floatEl.animate([
+          { filter: 'brightness(1.0)' },
+          { filter: 'brightness(1.18)' },
+          { filter: 'brightness(1.0)' }
+        ], { duration: 320 });
+      }
+
+      window.addEventListener('resize', () => {
+        const box = sizeFloatBox();
+        const W = window.innerWidth, H = window.innerHeight;
+        x = Math.min(Math.max(0, x), Math.max(0, W - box.w));
+        y = Math.min(Math.max(0, y), Math.max(0, H - box.h));
+        const sp = Math.hypot(vx, vy);
+        if (sp < MIN_SPEED) {
+          const f = MIN_SPEED / Math.max(1e-3, sp);
+          vx *= f; vy *= f;
+        } else if (sp > MAX_SPEED) {
+          const f = MAX_SPEED / sp; vx *= f; vy *= f;
+        }
+      });
+
+      requestAnimationFrame(step);
+    </script>
+  </body>
+</html>
