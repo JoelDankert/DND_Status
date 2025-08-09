@@ -85,7 +85,10 @@ def cycle_dnd():
     dnd = not dnd
     
     try:
-        subprocess.run(["notify-send", "Bitte nicht stören aktiviert", "Status wird geändert"], check=False)
+        if dnd:
+            subprocess.run(["notify-send", "Bitte nicht stören aktiviert", "Status wird geändert"], check=False)
+        else:
+            subprocess.run(["notify-send", "Bitte nicht stören deaktiviert", "Status wird geändert"], check=False)
     except FileNotFoundError:
         pass
 
