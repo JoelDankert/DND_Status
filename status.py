@@ -134,9 +134,31 @@ def event_listener():
     def cmd_exists(name):
         return shutil.which(name) is not None
 
+    # --- Mic mute detection (returns True if current/default mic is muted) ---
+    def mic_is_muted():
+        if not cmd_exists("pactl"):
+            return False
+        out = run(["pactl", "get-source-mute", "@DEFAULT_SOURCE@"]).strip()
+        if out.lower().startswith("mute:"):
+            return "yes" in out.lower()
+        ls = run(["pactl", "list", "sources"])
+        m = re.search(r"Default Source:\s*(\S+)", ls)
+        default_name = m.group(1) if m else None
+        blocks = re.split(r"\n(?=\S)", ls)
+        for b in blocks:
+            if (default_name and f"Name: {default_name}" in b) or (default_name is None and "Name:" in b):
+                mm = re.search(r"Mute:\s*(yes|no)", b, re.IGNORECASE)
+                if mm:
+                    return mm.group(1).lower() == "yes"
+        return False
+
     # --- Detect Discord voice call via PulseAudio/PipeWire (pactl) ---
     def in_discord_call():
         if not cmd_exists("pactl"):
+            return False
+
+        # NEW: If mic is muted, treat as not in call
+        if mic_is_muted():
             return False
 
         so = run(["pactl", "list", "source-outputs"])
@@ -250,5 +272,3 @@ if __name__ == "__main__":
     print(f"  im LAN:  http://{lan_ip}:{PORT}")
     
     app.run(host=HOST, port=PORT, debug=False, threaded=True)
-
-
